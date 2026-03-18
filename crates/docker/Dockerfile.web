@@ -2,15 +2,20 @@ FROM node:20-bookworm-slim AS ui
 
 WORKDIR /src/apps
 
-RUN corepack enable && corepack prepare pnpm@9.0.0 --activate
+RUN corepack enable && corepack prepare pnpm@10.30.3 --activate
 
-COPY apps/package.json apps/pnpm-lock.yaml apps/vite.config.js apps/index.html ./
+COPY apps/package.json ./package.json
+COPY apps/pnpm-lock.yaml ./pnpm-lock.yaml
+COPY apps/pnpm-workspace.yaml ./pnpm-workspace.yaml
+COPY apps/next.config.ts ./next.config.ts
+COPY apps/postcss.config.mjs ./postcss.config.mjs
+COPY apps/tsconfig.json ./tsconfig.json
+COPY apps/components.json ./components.json
+COPY apps/public ./public
 COPY apps/src ./src
-COPY apps/tests ./tests
-COPY apps/scripts ./scripts
 
 RUN pnpm install --frozen-lockfile
-RUN pnpm run build
+RUN pnpm run build:desktop
 
 FROM rust:1-bookworm AS builder
 
@@ -19,7 +24,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-COPY --from=ui /src/apps/dist ./apps/dist
+COPY --from=ui /src/apps/out ./apps/out
 
 RUN cargo build -p codexmanager-web --release --features embedded-ui
 
@@ -34,7 +39,6 @@ COPY --from=builder /src/target/release/codexmanager-web /usr/local/bin/codexman
 ENV CODEXMANAGER_WEB_ADDR=0.0.0.0:48761
 ENV CODEXMANAGER_WEB_NO_SPAWN_SERVICE=1
 ENV CODEXMANAGER_WEB_NO_OPEN=1
-# 默认值适配 docker-compose 的服务名；单独运行时可覆盖为外部 service 的地址。
 ENV CODEXMANAGER_SERVICE_ADDR=codexmanager-service:48760
 ENV CODEXMANAGER_DB_PATH=/data/codexmanager.db
 ENV CODEXMANAGER_RPC_TOKEN_FILE=/data/codexmanager.rpc-token
