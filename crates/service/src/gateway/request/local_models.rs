@@ -94,8 +94,10 @@ pub(super) fn maybe_respond_local_models(
                 Some(503),
                 super::request_log::RequestLogUsage::default(),
                 Some(message.as_str()),
+                None,
             );
-            let response = Response::from_string(message).with_status_code(503);
+            let response =
+                super::error_response::terminal_text_response(503, message, Some(trace_id));
             let _ = request.respond(response);
             return Ok(None);
         }
@@ -156,16 +158,20 @@ pub(super) fn maybe_respond_local_models(
         Some(200),
         super::request_log::RequestLogUsage::default(),
         fallback_reason.as_deref(),
+        None,
     );
-    let response = Response::from_string(output)
-        .with_status_code(200)
-        .with_header(
-            tiny_http::Header::from_bytes(
-                b"content-type".as_slice(),
-                b"application/json".as_slice(),
-            )
-            .map_err(|_| "build content-type header failed".to_string())?,
-        );
+    let response = super::error_response::with_trace_id_header(
+        Response::from_string(output)
+            .with_status_code(200)
+            .with_header(
+                tiny_http::Header::from_bytes(
+                    b"content-type".as_slice(),
+                    b"application/json".as_slice(),
+                )
+                .map_err(|_| "build content-type header failed".to_string())?,
+            ),
+        Some(trace_id),
+    );
     let _ = request.respond(response);
     Ok(None)
 }

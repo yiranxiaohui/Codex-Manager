@@ -192,6 +192,10 @@ impl Storage {
             [account_id],
         )?;
         tx.execute("DELETE FROM events WHERE account_id = ?1", [account_id])?;
+        tx.execute(
+            "DELETE FROM conversation_bindings WHERE account_id = ?1",
+            [account_id],
+        )?;
         tx.execute("DELETE FROM accounts WHERE id = ?1", [account_id])?;
         tx.commit()?;
         Ok(())
@@ -204,6 +208,11 @@ impl Storage {
         self.ensure_column("login_sessions", "note", "TEXT")?;
         self.ensure_column("login_sessions", "tags", "TEXT")?;
         self.ensure_column("login_sessions", "group_name", "TEXT")?;
+        Ok(())
+    }
+
+    pub(super) fn ensure_login_session_workspace_column(&self) -> Result<()> {
+        self.ensure_column("login_sessions", "workspace_id", "TEXT")?;
         Ok(())
     }
 
@@ -404,7 +413,7 @@ fn account_usage_filter_clause(
 ) -> String {
     match mode {
         AccountUsageQueryMode::ActiveAvailable => format!(
-            "LOWER(TRIM(COALESCE({account_alias}.status, ''))) != 'inactive'
+            "LOWER(TRIM(COALESCE({account_alias}.status, ''))) NOT IN ('inactive', 'disabled', 'unavailable')
              AND {usage_alias}.account_id IS NOT NULL
              AND ({})",
             available_usage_clause(usage_alias)

@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod accounts;
 mod api_keys;
+mod conversation_bindings;
 mod events;
 mod model_options;
 mod request_log_query;
@@ -45,6 +46,7 @@ pub struct LoginSession {
     pub state: String,
     pub status: String,
     pub error: Option<String>,
+    pub workspace_id: Option<String>,
     pub note: Option<String>,
     pub tags: Option<String>,
     pub group_name: Option<String>,
@@ -74,10 +76,27 @@ pub struct Event {
 }
 
 #[derive(Debug, Clone)]
+pub struct ConversationBinding {
+    pub platform_key_hash: String,
+    pub conversation_id: String,
+    pub account_id: String,
+    pub thread_epoch: i64,
+    pub thread_anchor: String,
+    pub status: String,
+    pub last_model: Option<String>,
+    pub last_switch_reason: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_used_at: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct RequestLog {
     pub trace_id: Option<String>,
     pub key_id: Option<String>,
     pub account_id: Option<String>,
+    pub initial_account_id: Option<String>,
+    pub attempted_account_ids_json: Option<String>,
     pub request_path: String,
     pub original_path: Option<String>,
     pub adapted_path: Option<String>,
@@ -87,6 +106,7 @@ pub struct RequestLog {
     pub response_adapter: Option<String>,
     pub upstream_url: Option<String>,
     pub status_code: Option<i64>,
+    pub duration_ms: Option<i64>,
     pub input_tokens: Option<i64>,
     pub cached_input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
@@ -122,11 +142,26 @@ pub struct RequestLogTodaySummary {
 }
 
 #[derive(Debug, Clone)]
+pub struct RequestLogQuerySummary {
+    pub count: i64,
+    pub success_count: i64,
+    pub error_count: i64,
+    pub total_tokens: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiKeyTokenUsageSummary {
+    pub key_id: String,
+    pub total_tokens: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ApiKey {
     pub id: String,
     pub name: Option<String>,
     pub model_slug: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
     pub client_type: String,
     pub protocol_type: String,
     pub auth_scheme: String,
@@ -309,19 +344,44 @@ impl Storage {
             "030_accounts_scale_indexes",
             include_str!("../../migrations/030_accounts_scale_indexes.sql"),
         )?;
+        self.apply_sql_or_compat_migration(
+            "031_request_logs_duration_ms",
+            include_str!("../../migrations/031_request_logs_duration_ms.sql"),
+            |s| s.ensure_request_log_duration_column(),
+        )?;
+        self.apply_sql_or_compat_migration(
+            "032_request_logs_attempt_chain",
+            include_str!("../../migrations/032_request_logs_attempt_chain.sql"),
+            |s| s.ensure_request_log_attempt_chain_columns(),
+        )?;
+        self.apply_sql_or_compat_migration(
+            "033_login_sessions_workspace_id",
+            include_str!("../../migrations/033_login_sessions_workspace_id.sql"),
+            |s| s.ensure_login_session_workspace_column(),
+        )?;
+        self.apply_sql_migration(
+            "034_conversation_bindings",
+            include_str!("../../migrations/034_conversation_bindings.sql"),
+        )?;
+        self.apply_sql_or_compat_migration(
+            "035_api_key_profiles_service_tier",
+            include_str!("../../migrations/035_api_key_profiles_service_tier.sql"),
+            |s| s.ensure_api_key_service_tier_column(),
+        )?;
         self.ensure_request_token_stats_table()?;
         Ok(())
     }
 
     pub fn insert_login_session(&self, session: &LoginSession) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO login_sessions (login_id, code_verifier, state, status, error, note, tags, group_name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO login_sessions (login_id, code_verifier, state, status, error, workspace_id, note, tags, group_name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             (
                 &session.login_id,
                 &session.code_verifier,
                 &session.state,
                 &session.status,
                 &session.error,
+                &session.workspace_id,
                 &session.note,
                 &session.tags,
                 &session.group_name,
@@ -334,7 +394,7 @@ impl Storage {
 
     pub fn get_login_session(&self, login_id: &str) -> Result<Option<LoginSession>> {
         let mut stmt = self.conn.prepare(
-            "SELECT login_id, code_verifier, state, status, error, note, tags, group_name, created_at, updated_at FROM login_sessions WHERE login_id = ?1",
+            "SELECT login_id, code_verifier, state, status, error, workspace_id, note, tags, group_name, created_at, updated_at FROM login_sessions WHERE login_id = ?1",
         )?;
         let mut rows = stmt.query([login_id])?;
         if let Some(row) = rows.next()? {
@@ -344,11 +404,12 @@ impl Storage {
                 state: row.get(2)?,
                 status: row.get(3)?,
                 error: row.get(4)?,
-                note: row.get(5)?,
-                tags: row.get(6)?,
-                group_name: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                workspace_id: row.get(5)?,
+                note: row.get(6)?,
+                tags: row.get(7)?,
+                group_name: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
             }))
         } else {
             Ok(None)

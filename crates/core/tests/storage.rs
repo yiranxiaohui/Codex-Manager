@@ -153,6 +153,7 @@ fn storage_login_session_roundtrip() {
         state: "state".to_string(),
         status: "pending".to_string(),
         error: None,
+        workspace_id: Some("org_123".to_string()),
         note: None,
         tags: None,
         group_name: None,
@@ -167,6 +168,7 @@ fn storage_login_session_roundtrip() {
         .expect("load session")
         .expect("session exists");
     assert_eq!(loaded.status, "pending");
+    assert_eq!(loaded.workspace_id.as_deref(), Some("org_123"));
 }
 
 #[test]
@@ -521,6 +523,8 @@ fn request_logs_support_prefixed_query_filters() {
             trace_id: Some("trc-alpha-extra".to_string()),
             key_id: Some("key-alpha-extra".to_string()),
             account_id: Some("acc-1".to_string()),
+            initial_account_id: Some("acc-1".to_string()),
+            attempted_account_ids_json: Some(r#"["acc-1"]"#.to_string()),
             request_path: "/v1/responses".to_string(),
             original_path: Some("/v1/chat/completions".to_string()),
             adapted_path: Some("/v1/responses".to_string()),
@@ -530,6 +534,7 @@ fn request_logs_support_prefixed_query_filters() {
             response_adapter: Some("OpenAIChatCompletionsJson".to_string()),
             upstream_url: Some("https://chatgpt.com/backend-api/codex/v1/responses".to_string()),
             status_code: Some(201),
+            duration_ms: Some(320),
             input_tokens: Some(11),
             cached_input_tokens: Some(3),
             output_tokens: Some(7),
@@ -546,6 +551,8 @@ fn request_logs_support_prefixed_query_filters() {
             trace_id: Some("trc-alpha".to_string()),
             key_id: Some("key-alpha".to_string()),
             account_id: Some("acc-1".to_string()),
+            initial_account_id: Some("acc-1".to_string()),
+            attempted_account_ids_json: Some(r#"["acc-1"]"#.to_string()),
             request_path: "/v1/responses".to_string(),
             original_path: Some("/v1/responses".to_string()),
             adapted_path: Some("/v1/responses".to_string()),
@@ -555,6 +562,7 @@ fn request_logs_support_prefixed_query_filters() {
             response_adapter: Some("Passthrough".to_string()),
             upstream_url: Some("https://chatgpt.com/backend-api/codex/v1/responses".to_string()),
             status_code: Some(200),
+            duration_ms: Some(210),
             input_tokens: Some(9),
             cached_input_tokens: Some(1),
             output_tokens: Some(5),
@@ -571,6 +579,8 @@ fn request_logs_support_prefixed_query_filters() {
             trace_id: Some("trc-beta".to_string()),
             key_id: Some("key-beta".to_string()),
             account_id: Some("acc-2".to_string()),
+            initial_account_id: Some("acc-2".to_string()),
+            attempted_account_ids_json: Some(r#"["acc-2"]"#.to_string()),
             request_path: "/v1/models".to_string(),
             original_path: Some("/v1/models".to_string()),
             adapted_path: Some("/v1/models".to_string()),
@@ -580,6 +590,7 @@ fn request_logs_support_prefixed_query_filters() {
             response_adapter: None,
             upstream_url: Some("https://api.openai.com/v1/models".to_string()),
             status_code: Some(503),
+            duration_ms: Some(1800),
             input_tokens: None,
             cached_input_tokens: None,
             output_tokens: None,
@@ -658,6 +669,8 @@ fn request_log_today_summary_reads_from_token_stats_table() {
             trace_id: Some("trc-summary".to_string()),
             key_id: Some("key-summary".to_string()),
             account_id: Some("acc-summary".to_string()),
+            initial_account_id: Some("acc-summary".to_string()),
+            attempted_account_ids_json: Some(r#"["acc-summary"]"#.to_string()),
             request_path: "/v1/responses".to_string(),
             original_path: Some("/v1/responses".to_string()),
             adapted_path: Some("/v1/responses".to_string()),
@@ -667,6 +680,7 @@ fn request_log_today_summary_reads_from_token_stats_table() {
             response_adapter: Some("Passthrough".to_string()),
             upstream_url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
             status_code: Some(200),
+            duration_ms: Some(1450),
             input_tokens: None,
             cached_input_tokens: None,
             output_tokens: None,
@@ -716,6 +730,8 @@ fn insert_request_log_with_token_stat_writes_both_tables_in_one_call() {
                 trace_id: Some("trc-atomic".to_string()),
                 key_id: Some("key-atomic".to_string()),
                 account_id: Some("acc-atomic".to_string()),
+                initial_account_id: Some("acc-atomic".to_string()),
+                attempted_account_ids_json: Some(r#"["acc-atomic"]"#.to_string()),
                 request_path: "/v1/responses".to_string(),
                 original_path: Some("/v1/responses".to_string()),
                 adapted_path: Some("/v1/responses".to_string()),
@@ -725,6 +741,7 @@ fn insert_request_log_with_token_stat_writes_both_tables_in_one_call() {
                 response_adapter: Some("Passthrough".to_string()),
                 upstream_url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
                 status_code: Some(200),
+                duration_ms: Some(980),
                 input_tokens: None,
                 cached_input_tokens: None,
                 output_tokens: None,
@@ -779,6 +796,8 @@ fn clear_request_logs_keeps_token_stats_for_usage_summary() {
             trace_id: Some("trc-clear".to_string()),
             key_id: Some("key-clear".to_string()),
             account_id: Some("acc-clear".to_string()),
+            initial_account_id: Some("acc-clear".to_string()),
+            attempted_account_ids_json: Some(r#"["acc-clear"]"#.to_string()),
             request_path: "/v1/responses".to_string(),
             original_path: Some("/v1/responses".to_string()),
             adapted_path: Some("/v1/responses".to_string()),
@@ -788,6 +807,7 @@ fn clear_request_logs_keeps_token_stats_for_usage_summary() {
             response_adapter: Some("Passthrough".to_string()),
             upstream_url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
             status_code: Some(200),
+            duration_ms: Some(760),
             input_tokens: None,
             cached_input_tokens: None,
             output_tokens: None,
@@ -827,6 +847,57 @@ fn clear_request_logs_keeps_token_stats_for_usage_summary() {
     assert_eq!(summary.output_tokens, 20);
     assert_eq!(summary.reasoning_output_tokens, 5);
     assert!(summary.estimated_cost_usd > 0.11);
+}
+
+#[test]
+fn request_token_stats_can_summarize_total_tokens_by_key() {
+    let storage = Storage::open_in_memory().expect("open in memory");
+    storage.init().expect("init schema");
+    let created_at = now_ts();
+
+    for (request_log_id, key_id, total_tokens, input_tokens, cached_input_tokens, output_tokens) in [
+        (101_i64, "gk_alpha", Some(120_i64), None, None, None),
+        (
+            102_i64,
+            "gk_alpha",
+            None,
+            Some(90_i64),
+            Some(30_i64),
+            Some(25_i64),
+        ),
+        (103_i64, "gk_beta", Some(75_i64), None, None, None),
+        (104_i64, "", Some(999_i64), None, None, None),
+    ] {
+        storage
+            .insert_request_token_stat(&RequestTokenStat {
+                request_log_id,
+                key_id: if key_id.is_empty() {
+                    None
+                } else {
+                    Some(key_id.to_string())
+                },
+                account_id: Some("acc-summary".to_string()),
+                model: Some("gpt-5.3-codex".to_string()),
+                input_tokens,
+                cached_input_tokens,
+                output_tokens,
+                total_tokens,
+                reasoning_output_tokens: Some(0),
+                estimated_cost_usd: Some(0.0),
+                created_at,
+            })
+            .expect("insert token stat");
+    }
+
+    let summary = storage
+        .summarize_request_token_stats_by_key()
+        .expect("summarize by key");
+
+    assert_eq!(summary.len(), 2);
+    assert_eq!(summary[0].key_id, "gk_alpha");
+    assert_eq!(summary[0].total_tokens, 205);
+    assert_eq!(summary[1].key_id, "gk_beta");
+    assert_eq!(summary[1].total_tokens, 75);
 }
 
 #[test]
@@ -892,6 +963,7 @@ fn storage_api_keys_include_profile_fields() {
             name: Some("main".to_string()),
             model_slug: Some("claude-sonnet-4".to_string()),
             reasoning_effort: Some("medium".to_string()),
+            service_tier: Some("fast".to_string()),
             client_type: "claude_code".to_string(),
             protocol_type: "anthropic_native".to_string(),
             auth_scheme: "x_api_key".to_string(),
@@ -914,6 +986,7 @@ fn storage_api_keys_include_profile_fields() {
     assert_eq!(key.protocol_type, "anthropic_native");
     assert_eq!(key.auth_scheme, "x_api_key");
     assert_eq!(key.model_slug.as_deref(), Some("claude-sonnet-4"));
+    assert_eq!(key.service_tier.as_deref(), Some("fast"));
 }
 
 #[test]
@@ -927,6 +1000,7 @@ fn storage_can_roundtrip_api_key_secret() {
             name: Some("secret".to_string()),
             model_slug: None,
             reasoning_effort: None,
+            service_tier: None,
             client_type: "codex".to_string(),
             protocol_type: "openai_compat".to_string(),
             auth_scheme: "authorization_bearer".to_string(),

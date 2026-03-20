@@ -1,8 +1,10 @@
-use codexmanager_core::rpc::types::{ApiKeyListResult, JsonRpcRequest, JsonRpcResponse};
+use codexmanager_core::rpc::types::{
+    ApiKeyListResult, ApiKeyUsageStatListResult, JsonRpcRequest, JsonRpcResponse,
+};
 
 use crate::{
     apikey_create, apikey_delete, apikey_disable, apikey_enable, apikey_list, apikey_models,
-    apikey_read_secret, apikey_update_model,
+    apikey_read_secret, apikey_update_model, apikey_usage_stats,
 };
 
 pub(super) fn try_handle(req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
@@ -14,6 +16,7 @@ pub(super) fn try_handle(req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
             let name = super::string_param(req, "name");
             let model_slug = super::string_param(req, "modelSlug");
             let reasoning_effort = super::string_param(req, "reasoningEffort");
+            let service_tier = super::string_param(req, "serviceTier");
             let protocol_type = super::string_param(req, "protocolType");
             let upstream_base_url = super::string_param(req, "upstreamBaseUrl");
             let static_headers_json = super::string_param(req, "staticHeadersJson");
@@ -21,6 +24,7 @@ pub(super) fn try_handle(req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
                 name,
                 model_slug,
                 reasoning_effort,
+                service_tier,
                 protocol_type,
                 upstream_base_url,
                 static_headers_json,
@@ -34,17 +38,32 @@ pub(super) fn try_handle(req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
             let refresh_remote = super::bool_param(req, "refreshRemote").unwrap_or(false);
             super::value_or_error(apikey_models::read_model_options(refresh_remote))
         }
+        "apikey/usageStats" => super::value_or_error(
+            apikey_usage_stats::read_api_key_usage_stats()
+                .map(|items| ApiKeyUsageStatListResult { items }),
+        ),
         "apikey/updateModel" => {
             let key_id = super::str_param(req, "id").unwrap_or("");
+            let has_name = req
+                .params
+                .as_ref()
+                .and_then(|value| value.as_object())
+                .map(|params| params.contains_key("name"))
+                .unwrap_or(false);
+            let name = super::string_param(req, "name");
             let model_slug = super::string_param(req, "modelSlug");
             let reasoning_effort = super::string_param(req, "reasoningEffort");
+            let service_tier = super::string_param(req, "serviceTier");
             let protocol_type = super::string_param(req, "protocolType");
             let upstream_base_url = super::string_param(req, "upstreamBaseUrl");
             let static_headers_json = super::string_param(req, "staticHeadersJson");
             super::ok_or_error(apikey_update_model::update_api_key_model(
                 key_id,
+                name,
+                has_name,
                 model_slug,
                 reasoning_effort,
+                service_tier,
                 protocol_type,
                 upstream_base_url,
                 static_headers_json,

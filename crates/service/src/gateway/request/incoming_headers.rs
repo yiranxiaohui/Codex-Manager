@@ -8,6 +8,10 @@ pub(crate) struct IncomingHeaderSnapshot {
     authorization_bearer_case_insensitive: Option<String>,
     x_api_key: Option<String>,
     session_id: Option<String>,
+    client_request_id: Option<String>,
+    subagent: Option<String>,
+    beta_features: Option<String>,
+    turn_metadata: Option<String>,
     turn_state: Option<String>,
     conversation_id: Option<String>,
 }
@@ -42,6 +46,34 @@ impl IncomingHeaderSnapshot {
                 let value = header.value.as_str().trim();
                 if !value.is_empty() {
                     snapshot.session_id = Some(value.to_string());
+                }
+                continue;
+            }
+            if snapshot.client_request_id.is_none() && header.field.equiv("x-client-request-id") {
+                let value = header.value.as_str().trim();
+                if !value.is_empty() {
+                    snapshot.client_request_id = Some(value.to_string());
+                }
+                continue;
+            }
+            if snapshot.subagent.is_none() && header.field.equiv("x-openai-subagent") {
+                let value = header.value.as_str().trim();
+                if !value.is_empty() {
+                    snapshot.subagent = Some(value.to_string());
+                }
+                continue;
+            }
+            if snapshot.beta_features.is_none() && header.field.equiv("x-codex-beta-features") {
+                let value = header.value.as_str().trim();
+                if !value.is_empty() {
+                    snapshot.beta_features = Some(value.to_string());
+                }
+                continue;
+            }
+            if snapshot.turn_metadata.is_none() && header.field.equiv("x-codex-turn-metadata") {
+                let value = header.value.as_str().trim();
+                if !value.is_empty() {
+                    snapshot.turn_metadata = Some(value.to_string());
                 }
                 continue;
             }
@@ -86,12 +118,49 @@ impl IncomingHeaderSnapshot {
         self.session_id.as_deref()
     }
 
+    pub(crate) fn client_request_id(&self) -> Option<&str> {
+        self.client_request_id.as_deref()
+    }
+
+    pub(crate) fn subagent(&self) -> Option<&str> {
+        self.subagent.as_deref()
+    }
+
+    pub(crate) fn beta_features(&self) -> Option<&str> {
+        self.beta_features.as_deref()
+    }
+
+    pub(crate) fn turn_metadata(&self) -> Option<&str> {
+        self.turn_metadata.as_deref()
+    }
+
     pub(crate) fn turn_state(&self) -> Option<&str> {
         self.turn_state.as_deref()
     }
 
     pub(crate) fn conversation_id(&self) -> Option<&str> {
         self.conversation_id.as_deref()
+    }
+
+    pub(crate) fn with_conversation_id_override(&self, conversation_id: Option<&str>) -> Self {
+        self.with_thread_affinity_override(conversation_id, false)
+    }
+
+    pub(crate) fn with_thread_affinity_override(
+        &self,
+        conversation_id: Option<&str>,
+        reset_session_affinity: bool,
+    ) -> Self {
+        let mut next = self.clone();
+        next.conversation_id = conversation_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if reset_session_affinity {
+            next.session_id = None;
+            next.turn_state = None;
+        }
+        next
     }
 }
 

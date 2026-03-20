@@ -66,9 +66,14 @@ pub(crate) fn handle_gateway_request(mut request: Request) -> Result<(), String>
                         Some(err.status_code),
                         super::request_log::RequestLogUsage::default(),
                         Some(err.message.as_str()),
+                        None,
                     );
                 }
-                let response = Response::from_string(err.message).with_status_code(err.status_code);
+                let response = super::error_response::terminal_text_response(
+                    err.status_code,
+                    err.message,
+                    Some(trace_id.as_str()),
+                );
                 let _ = request.respond(response);
                 return Ok(());
             }

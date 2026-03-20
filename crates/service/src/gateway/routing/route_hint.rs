@@ -17,7 +17,8 @@ const ROUTE_STATE_TTL_SECS_ENV: &str = "CODEXMANAGER_ROUTE_STATE_TTL_SECS";
 const ROUTE_STATE_CAPACITY_ENV: &str = "CODEXMANAGER_ROUTE_STATE_CAPACITY";
 const DEFAULT_ROUTE_HEALTH_P2C_ENABLED: bool = true;
 const DEFAULT_ROUTE_HEALTH_P2C_ORDERED_WINDOW: usize = 3;
-const DEFAULT_ROUTE_HEALTH_P2C_BALANCED_WINDOW: usize = 6;
+// 中文注释：balanced 默认应严格轮询所有可用账号；仅在显式调大窗口时才启用健康度换头。
+const DEFAULT_ROUTE_HEALTH_P2C_BALANCED_WINDOW: usize = 1;
 // 中文注释：Route 状态（按 key_id + model 维度）用于 round-robin 起点与 P2C nonce。
 // 为避免 key/model 高基数导致 HashMap 无限增长，默认增加 TTL + 容量上限；不会影响“短时间内连续请求”的既有语义。
 const DEFAULT_ROUTE_STATE_TTL_SECS: u64 = 6 * 60 * 60;
@@ -82,7 +83,7 @@ pub(crate) fn apply_route_strategy(
 
 fn rotate_to_manual_preferred_account(candidates: &mut [(Account, Token)]) -> bool {
     let lock = ROUTE_STATE.get_or_init(|| Mutex::new(RouteRoundRobinState::default()));
-    let mut state = crate::lock_utils::lock_recover(lock, "route_state");
+    let state = crate::lock_utils::lock_recover(lock, "route_state");
     let Some(account_id) = state.manual_preferred_account_id.as_deref() else {
         return false;
     };
@@ -90,8 +91,8 @@ fn rotate_to_manual_preferred_account(candidates: &mut [(Account, Token)]) -> bo
         .iter()
         .position(|(account, _)| account.id.eq(account_id))
     else {
-        // 中文注释：手动指定账号已不在可用候选池（可能用尽/不可用），自动回退到常规轮转。
-        state.manual_preferred_account_id = None;
+        // 中文注释：手动优先是用户显式选择；当前轮次未命中候选池时保持该状态，
+        // 避免一次过滤/暂时不可用就把用户设置静默清掉。
         return false;
     };
     if index > 0 {
@@ -491,10 +492,10 @@ fn clear_route_state_for_tests() {
 #[cfg(test)]
 fn route_strategy_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static ROUTE_STRATEGY_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-    ROUTE_STRATEGY_TEST_MUTEX
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("route strategy test mutex")
+    crate::lock_utils::lock_recover(
+        ROUTE_STRATEGY_TEST_MUTEX.get_or_init(|| Mutex::new(())),
+        "route strategy test mutex",
+    )
 }
 
 #[cfg(test)]

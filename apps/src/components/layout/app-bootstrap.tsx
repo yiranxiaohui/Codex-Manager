@@ -1,0 +1,531 @@
+"use client";
+
+import { useCallback, useEffect, useState, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { usePathname, useRouter } from "next/navigation";
+import { AlertCircle, Play, RefreshCw } from "lucide-react";
+import { useTheme } from "next-themes";
+import { toast } from "sonner";
+import { useAppStore } from "@/lib/store/useAppStore";
+import { accountClient } from "@/lib/api/account-client";
+import { serviceClient } from "@/lib/api/service-client";
+import {
+  buildStartupSnapshotQueryKey,
+  STARTUP_SNAPSHOT_REQUEST_LOG_LIMIT,
+  STARTUP_SNAPSHOT_STALE_TIME,
+} from "@/lib/api/startup-snapshot";
+import { appClient } from "@/lib/api/app-client";
+import { isTauriRuntime } from "@/lib/api/transport";
+import { Button } from "@/components/ui/button";
+import { applyAppearancePreset } from "@/lib/appearance";
+import {
+  formatServiceError,
+  isExpectedInitializeResult,
+  normalizeServiceAddr,
+} from "@/lib/utils/service";
+import { getCanonicalStaticRouteUrl } from "@/lib/utils/static-routes";
+
+const DEFAULT_SERVICE_ADDR = "localhost:48760";
+const PRIMARY_PAGE_WARMUP_STALE_TIME = 30_000;
+const PRIMARY_PAGE_WARMUP_PAGE_SIZE = 20;
+const PRIMARY_PAGE_ROUTES = ["/", "/accounts/", "/apikeys/", "/logs/", "/settings/"] as const;
+const DEV_ROUTE_WARMUP_TIMEOUT_MS = 12_000;
+const STARTUP_WARMUP_LABEL = "[startup warmup]";
+const BOOTSTRAP_RECOVERY_RETRY_MS = 1_200;
+const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+export function AppBootstrap({ children }: { children: React.ReactNode }) {
+  const { setServiceStatus, setAppSettings, serviceStatus } = useAppStore();
+  const { setTheme } = useTheme();
+  const queryClient = useQueryClient();
+  const pathname = usePathname();
+  const router = useRouter();
+  const [isInitializing, setIsInitializing] = useState(true);
+  const hasInitializedOnce = useRef(false);
+  const hasWarmedDevRoutes = useRef(false);
+  const recoveryTimerRef = useRef<number | null>(null);
+  const retryInitRef = useRef<(() => Promise<void>) | null>(null);
+  const serviceStatusRef = useRef(serviceStatus);
+  const [error, setError] = useState<string | null>(null);
+  const supportsLocalServiceStart = isTauriRuntime();
+
+  useEffect(() => {
+    serviceStatusRef.current = serviceStatus;
+  }, [serviceStatus]);
+
+  const applyLowTransparency = (enabled: boolean) => {
+    if (enabled) {
+      document.body.classList.add("low-transparency");
+    } else {
+      document.body.classList.remove("low-transparency");
+    }
+  };
+
+  const initializeService = useCallback(async (addr: string, retries = 0) => {
+    let lastError: unknown = null;
+
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        const initializeResult = await serviceClient.initialize(addr);
+        if (!isExpectedInitializeResult(initializeResult)) {
+          throw new Error("Port is in use or unexpected service responded (missing server_name)");
+        }
+        return initializeResult;
+      } catch (serviceError: unknown) {
+        lastError = serviceError;
+        if (attempt < retries) {
+          await sleep(300);
+        }
+      }
+    }
+
+    throw lastError || new Error(`服务初始化失败: ${addr}`);
+  }, []);
+
+  const startAndInitializeService = useCallback(
+    async (addr: string) => {
+      await serviceClient.start(addr);
+      return initializeService(addr, 2);
+    },
+    [initializeService]
+  );
+
+  const prefetchStartupSnapshot = useCallback(
+    async (addr: string) => {
+      await queryClient.prefetchQuery({
+        queryKey: buildStartupSnapshotQueryKey(
+          addr,
+          STARTUP_SNAPSHOT_REQUEST_LOG_LIMIT
+        ),
+        queryFn: () =>
+          serviceClient.getStartupSnapshot({
+            requestLogLimit: STARTUP_SNAPSHOT_REQUEST_LOG_LIMIT,
+          }),
+        staleTime: STARTUP_SNAPSHOT_STALE_TIME,
+      });
+    },
+    [queryClient]
+  );
+
+  const warmupPrimaryPages = useCallback(
+    async (addr: string) => {
+      for (const route of PRIMARY_PAGE_ROUTES) {
+        router.prefetch(route);
+      }
+
+      const warmupTasks = [
+        queryClient.prefetchQuery({
+          queryKey: ["accounts", "list"],
+          queryFn: () => accountClient.list(),
+          staleTime: PRIMARY_PAGE_WARMUP_STALE_TIME,
+        }),
+        queryClient.prefetchQuery({
+          queryKey: ["usage", "list"],
+          queryFn: () => accountClient.listUsage(),
+          staleTime: PRIMARY_PAGE_WARMUP_STALE_TIME,
+        }),
+        queryClient.prefetchQuery({
+          queryKey: ["gateway", "manual-account", addr || null],
+          queryFn: () => serviceClient.getManualPreferredAccountId(),
+          staleTime: PRIMARY_PAGE_WARMUP_STALE_TIME,
+        }),
+        queryClient.prefetchQuery({
+          queryKey: ["apikeys"],
+          queryFn: () => accountClient.listApiKeys(),
+          staleTime: PRIMARY_PAGE_WARMUP_STALE_TIME,
+        }),
+        queryClient.prefetchQuery({
+          queryKey: ["apikey-models"],
+          queryFn: () => accountClient.listModels(false),
+          staleTime: PRIMARY_PAGE_WARMUP_STALE_TIME,
+        }),
+        queryClient.prefetchQuery({
+          queryKey: ["apikey-usage-stats"],
+          queryFn: async () => {
+            const stats = await accountClient.listApiKeyUsageStats();
+            return stats.reduce<Record<string, number>>((result, item) => {
+              const keyId = String(item.keyId || "").trim();
+              if (!keyId) return result;
+              result[keyId] = Math.max(0, item.totalTokens || 0);
+              return result;
+            }, {});
+          },
+          staleTime: PRIMARY_PAGE_WARMUP_STALE_TIME,
+        }),
+        queryClient.prefetchQuery({
+          queryKey: ["accounts", "lookup"],
+          queryFn: () => accountClient.list(),
+          staleTime: PRIMARY_PAGE_WARMUP_STALE_TIME,
+        }),
+        queryClient.prefetchQuery({
+          queryKey: ["logs", "list", "", "all", 1, PRIMARY_PAGE_WARMUP_PAGE_SIZE],
+          queryFn: () =>
+            serviceClient.listRequestLogs({
+              query: "",
+              statusFilter: "all",
+              page: 1,
+              pageSize: PRIMARY_PAGE_WARMUP_PAGE_SIZE,
+            }),
+          staleTime: PRIMARY_PAGE_WARMUP_STALE_TIME,
+        }),
+        queryClient.prefetchQuery({
+          queryKey: ["logs", "summary", "", "all"],
+          queryFn: () =>
+            serviceClient.getRequestLogSummary({
+              query: "",
+              statusFilter: "all",
+            }),
+          staleTime: PRIMARY_PAGE_WARMUP_STALE_TIME,
+        }),
+        queryClient.prefetchQuery({
+          queryKey: ["app-settings-snapshot"],
+          queryFn: () => appClient.getSettings(),
+          staleTime: PRIMARY_PAGE_WARMUP_STALE_TIME,
+        }),
+      ];
+
+      await Promise.allSettled(warmupTasks);
+    },
+    [queryClient, router]
+  );
+
+  const warmupConnectedService = useCallback(
+    async (addr: string) => {
+      try {
+        await prefetchStartupSnapshot(addr);
+      } catch (warmupError) {
+        console.warn(
+          `${STARTUP_WARMUP_LABEL} startup snapshot prefetch failed`,
+          warmupError,
+        );
+      }
+
+      try {
+        await warmupPrimaryPages(addr);
+      } catch (warmupError) {
+        console.warn(
+          `${STARTUP_WARMUP_LABEL} primary page warmup failed`,
+          warmupError,
+        );
+      }
+    },
+    [prefetchStartupSnapshot, warmupPrimaryPages],
+  );
+
+  const applyConnectedServiceState = useCallback(
+    (addr: string, version: string, lowTransparency: boolean) => {
+      if (recoveryTimerRef.current !== null) {
+        window.clearTimeout(recoveryTimerRef.current);
+        recoveryTimerRef.current = null;
+      }
+      setServiceStatus({
+        addr,
+        connected: true,
+        version,
+      });
+      applyLowTransparency(lowTransparency);
+      setIsInitializing(false);
+      hasInitializedOnce.current = true;
+      void warmupConnectedService(addr);
+    },
+    [setServiceStatus, warmupConnectedService],
+  );
+
+  const scheduleBootstrapRecovery = useCallback(() => {
+    if (typeof window === "undefined" || recoveryTimerRef.current !== null) {
+      return;
+    }
+    recoveryTimerRef.current = window.setTimeout(() => {
+      recoveryTimerRef.current = null;
+      void retryInitRef.current?.();
+    }, BOOTSTRAP_RECOVERY_RETRY_MS);
+  }, []);
+
+  const tryRecoverServiceAfterFailure = useCallback(
+    async (addr: string, lowTransparency: boolean) => {
+      const recovered = await initializeService(addr, 6);
+      applyConnectedServiceState(addr, recovered.version, lowTransparency);
+    },
+    [applyConnectedServiceState, initializeService],
+  );
+
+  const warmupDevRouteTransitions = useCallback(() => {
+    if (process.env.NODE_ENV !== "development") {
+      return () => {};
+    }
+    if (hasWarmedDevRoutes.current || typeof window === "undefined") {
+      return () => {};
+    }
+    hasWarmedDevRoutes.current = true;
+
+    const runtime = globalThis as typeof globalThis & {
+      requestIdleCallback?: (
+        callback: IdleRequestCallback,
+        options?: IdleRequestOptions,
+      ) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const currentPath = window.location.pathname;
+    const routes = PRIMARY_PAGE_ROUTES.filter((route) => route !== currentPath);
+    const controllers: AbortController[] = [];
+    let disposed = false;
+
+    const warmRouteDocument = async (route: (typeof PRIMARY_PAGE_ROUTES)[number]) => {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), DEV_ROUTE_WARMUP_TIMEOUT_MS);
+      controllers.push(controller);
+      try {
+        await fetch(route, {
+          method: "GET",
+          credentials: "same-origin",
+          cache: "no-store",
+          signal: controller.signal,
+          headers: {
+            "x-codexmanager-route-warmup": "1",
+          },
+        });
+      } catch {
+        // 中文注释：dev 预热只用于减少首次切页编译等待，失败时静默回退到正常导航。
+      } finally {
+        window.clearTimeout(timeoutId);
+        const index = controllers.indexOf(controller);
+        if (index >= 0) {
+          controllers.splice(index, 1);
+        }
+      }
+    };
+
+    const runWarmup = () => {
+      void (async () => {
+        for (const route of routes) {
+          if (disposed) {
+            return;
+          }
+          router.prefetch(route);
+          await warmRouteDocument(route);
+        }
+      })();
+    };
+
+    if (runtime.requestIdleCallback) {
+      const idleId = runtime.requestIdleCallback(() => runWarmup(), {
+        timeout: 800,
+      });
+      return () => {
+        disposed = true;
+        runtime.cancelIdleCallback?.(idleId);
+        for (const controller of controllers) {
+          controller.abort();
+        }
+      };
+    }
+
+    const timer = window.setTimeout(runWarmup, 120);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+      for (const controller of controllers) {
+        controller.abort();
+      }
+    };
+  }, [router]);
+
+  const init = useCallback(async () => {
+    const desktopRuntime = isTauriRuntime();
+
+    // Only show full screen loading if we haven't initialized once
+    if (!hasInitializedOnce.current) {
+      setIsInitializing(true);
+    }
+    setError(null);
+
+    try {
+      const settings = await appClient.getSettings();
+      const addr = normalizeServiceAddr(settings.serviceAddr || DEFAULT_SERVICE_ADDR);
+      const currentServiceStatus = serviceStatusRef.current;
+      
+      const currentAppliedTheme = typeof document !== 'undefined' ? document.documentElement.getAttribute('data-theme') : null;
+      if (settings.theme && settings.theme !== currentAppliedTheme) {
+        setTheme(settings.theme);
+      }
+      applyAppearancePreset(settings.appearancePreset);
+      
+      setAppSettings(settings);
+      
+      // CRITICAL: Do not reset status to connected: false if we are already connected
+      // This prevents the Header badge from flashing
+      if (!currentServiceStatus.connected || currentServiceStatus.addr !== addr) {
+        setServiceStatus({ addr, connected: false, version: "" });
+      }
+
+      try {
+        let initializeResult;
+        try {
+          initializeResult = await initializeService(addr, 1);
+        } catch (initializeError) {
+          if (!desktopRuntime) {
+            throw initializeError;
+          }
+          initializeResult = await startAndInitializeService(addr);
+        }
+        applyConnectedServiceState(
+          addr,
+          initializeResult.version,
+          settings.lowTransparency,
+        );
+      } catch (serviceError: unknown) {
+        try {
+          await tryRecoverServiceAfterFailure(addr, settings.lowTransparency);
+          return;
+        } catch {}
+        if (!hasInitializedOnce.current) {
+           setServiceStatus({ addr, connected: false, version: "" });
+           setError(formatServiceError(serviceError));
+           scheduleBootstrapRecovery();
+        }
+        setIsInitializing(false);
+      }
+    } catch (appError: unknown) {
+      if (!hasInitializedOnce.current) {
+        setError(appError instanceof Error ? appError.message : String(appError));
+      }
+      setIsInitializing(false);
+    }
+    // 使用 ref 读取最新 serviceStatus，避免把初始化流程绑定到状态抖动上
+  }, [
+    applyConnectedServiceState,
+    initializeService,
+    scheduleBootstrapRecovery,
+    setAppSettings,
+    setServiceStatus,
+    setTheme,
+    startAndInitializeService,
+    tryRecoverServiceAfterFailure,
+  ]);
+
+  const handleForceStart = async () => {
+    if (!isTauriRuntime()) {
+      void init();
+      return;
+    }
+
+    setIsInitializing(true);
+    setError(null);
+    try {
+      const addr = normalizeServiceAddr(serviceStatus.addr || DEFAULT_SERVICE_ADDR);
+      const settings = await appClient.setSettings({ serviceAddr: addr });
+      
+      const currentAppliedTheme = typeof document !== 'undefined' ? document.documentElement.getAttribute('data-theme') : null;
+      if (settings.theme && settings.theme !== currentAppliedTheme) {
+        setTheme(settings.theme);
+      }
+      applyAppearancePreset(settings.appearancePreset);
+      
+      setAppSettings(settings);
+      const initializeResult = await startAndInitializeService(addr);
+      applyConnectedServiceState(
+        addr,
+        initializeResult.version,
+        settings.lowTransparency,
+      );
+      toast.success("服务已启动");
+    } catch (startError: unknown) {
+      try {
+        const addr = normalizeServiceAddr(serviceStatus.addr || DEFAULT_SERVICE_ADDR);
+        const settings = await appClient.getSettings();
+        await tryRecoverServiceAfterFailure(addr, settings.lowTransparency);
+        toast.success("服务已启动");
+        return;
+      } catch {}
+      setServiceStatus({ connected: false, version: "" });
+      setError(formatServiceError(startError));
+      scheduleBootstrapRecovery();
+      setIsInitializing(false);
+    }
+  };
+
+  useEffect(() => {
+    retryInitRef.current = init;
+  }, [init]);
+
+  useEffect(() => {
+    void init();
+  }, [init]);
+
+  useEffect(() => {
+    return () => {
+      if (recoveryTimerRef.current !== null) {
+        window.clearTimeout(recoveryTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => warmupDevRouteTransitions(), [warmupDevRouteTransitions]);
+
+  useEffect(() => {
+    if (isTauriRuntime() || typeof window === "undefined") {
+      return;
+    }
+
+    const canonicalUrl = getCanonicalStaticRouteUrl();
+    if (!canonicalUrl) {
+      return;
+    }
+
+    window.history.replaceState(window.history.state, "", canonicalUrl);
+  }, [pathname]);
+
+  const showLoading = isInitializing && !hasInitializedOnce.current;
+  const showError = !!error && !hasInitializedOnce.current;
+
+  return (
+    <>
+      {/* Always keep children mounted to prevent Header/Sidebar remounting 'reload' feel */}
+      {children}
+
+      {(showLoading || showError) && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-background">
+          <div className="flex w-full max-w-md flex-col items-center gap-6 rounded-3xl glass-card p-10 shadow-2xl animate-in fade-in zoom-in duration-500">
+            {showLoading ? (
+              <>
+                <div className="h-14 w-14 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+                <div className="flex flex-col items-center gap-2">
+                  <h2 className="text-2xl font-bold tracking-tight">正在准备环境</h2>
+                  <p className="px-4 text-center text-sm text-muted-foreground">
+                    正在同步本地配置，请稍候...
+                  </p>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-destructive/10">
+                  <AlertCircle className="h-8 w-8 text-destructive" />
+                </div>
+                <div className="flex flex-col items-center gap-2 text-center">
+                  <h2 className="text-xl font-bold tracking-tight text-destructive">
+                    无法同步核心服务状态
+                  </h2>
+                  <p className="max-h-32 overflow-y-auto break-all rounded-lg bg-muted/50 p-3 font-mono text-[10px] text-muted-foreground">
+                    {error}
+                  </p>
+                </div>
+                <div
+                  className={`grid w-full gap-3 ${supportsLocalServiceStart ? "grid-cols-2" : "grid-cols-1"}`}
+                >
+                  <Button variant="outline" onClick={() => void init()} className="h-11 gap-2">
+                    <RefreshCw className="h-4 w-4" /> 重试
+                  </Button>
+                  {supportsLocalServiceStart ? (
+                    <Button onClick={handleForceStart} className="h-11 gap-2 bg-primary">
+                      <Play className="h-4 w-4" /> 强制启动
+                    </Button>
+                  ) : null}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}

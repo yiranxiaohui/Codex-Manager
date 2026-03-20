@@ -1,10 +1,13 @@
 use crate::storage_helpers::open_storage;
 
+#[path = "routing/conversation_binding.rs"]
+mod conversation_binding;
 #[path = "routing/cooldown.rs"]
 mod cooldown;
+mod error_response;
 #[path = "routing/failover.rs"]
 mod failover;
-#[path = "observability/http_bridge.rs"]
+#[path = "observability/http_bridge/mod.rs"]
 mod http_bridge;
 #[path = "request/incoming_headers.rs"]
 mod incoming_headers;
@@ -63,7 +66,11 @@ pub(super) use request_helpers::{
 };
 #[cfg(test)]
 use request_helpers::{should_drop_incoming_header, should_drop_incoming_header_for_failover};
-use request_rewrite::{apply_request_overrides, compute_upstream_url};
+use request_rewrite::{
+    apply_request_overrides_with_forced_prompt_cache_key,
+    apply_request_overrides_with_service_tier_and_forced_prompt_cache_key,
+    apply_request_overrides_with_service_tier_and_prompt_cache_key, compute_upstream_url,
+};
 #[cfg(test)]
 use upstream::config::normalize_upstream_base_url;
 use upstream::config::{
@@ -71,7 +78,10 @@ use upstream::config::{
     should_try_openai_fallback, should_try_openai_fallback_by_status,
 };
 #[cfg(test)]
-use upstream::header_profile::{build_codex_upstream_headers, CodexUpstreamHeaderInput};
+pub(super) use upstream::header_profile::{
+    build_codex_compact_upstream_headers, build_codex_upstream_headers,
+    CodexCompactUpstreamHeaderInput, CodexUpstreamHeaderInput,
+};
 
 // HTTP backend runtime metrics are exported via the gateway `/metrics` endpoint as well.
 pub(crate) fn record_http_queue_capacity(normal_capacity: usize, stream_capacity: usize) {
@@ -99,6 +109,98 @@ use cooldown::{
 pub(super) use failover::should_failover_after_refresh;
 use failover::should_failover_from_cached_snapshot;
 use http_bridge::respond_with_upstream;
+pub(crate) use http_bridge::summarize_upstream_error_hint_from_body;
+pub(crate) fn extract_identity_error_code_from_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<String> {
+    headers
+        .get("x-error-json")
+        .and_then(|value| value.to_str().ok())
+        .and_then(extract_identity_error_code_from_header_value)
+}
+
+fn extract_identity_error_code_from_header_value(raw: &str) -> Option<String> {
+    if let Some(code) = extract_identity_error_code_from_error_json(raw) {
+        return Some(code);
+    }
+
+    let decoded = decode_base64_header_value(raw.as_bytes())?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    extract_identity_error_code_from_error_json(&decoded)
+}
+
+fn extract_identity_error_code_from_error_json(raw: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    value
+        .get("identity_error_code")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|error| error.get("code"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|error| error.get("identity_error_code"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            value
+                .get("details")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|details| details.get("identity_error_code"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn decode_base64_header_value(input: &[u8]) -> Option<Vec<u8>> {
+    fn decode_char(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' | b'-' => Some(62),
+            b'/' | b'_' => Some(63),
+            _ => None,
+        }
+    }
+
+    let filtered = input
+        .iter()
+        .copied()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    if filtered.is_empty() || filtered.len() % 4 != 0 {
+        return None;
+    }
+
+    let mut output = Vec::with_capacity(filtered.len() / 4 * 3);
+    for chunk in filtered.chunks(4) {
+        let a = decode_char(chunk[0])?;
+        let b = decode_char(chunk[1])?;
+        let c_pad = chunk[2] == b'=';
+        let d_pad = chunk[3] == b'=';
+        let c = if c_pad { 0 } else { decode_char(chunk[2])? };
+        let d = if d_pad { 0 } else { decode_char(chunk[3])? };
+
+        output.push((a << 2) | (b >> 4));
+        if !c_pad {
+            output.push((b << 4) | (c >> 2));
+        }
+        if !d_pad {
+            output.push((c << 6) | d);
+        }
+    }
+
+    Some(output)
+}
 pub(super) use incoming_headers::IncomingHeaderSnapshot;
 use local_count_tokens::maybe_respond_local_count_tokens;
 use local_models::maybe_respond_local_models;
@@ -113,14 +215,13 @@ pub(crate) use runtime_config::front_proxy_max_body_bytes;
 use runtime_config::{
     account_max_inflight_limit, fresh_upstream_client, fresh_upstream_client_for_account,
     request_gate_wait_timeout, trace_body_preview_max_bytes, upstream_client,
-    upstream_client_for_account, upstream_cookie, upstream_stream_timeout, upstream_total_timeout,
-    DEFAULT_GATEWAY_DEBUG, DEFAULT_MODELS_CLIENT_VERSION,
+    upstream_client_for_account, upstream_stream_timeout, upstream_total_timeout,
+    DEFAULT_GATEWAY_DEBUG,
 };
 use selection::collect_gateway_candidates;
 #[cfg(test)]
 use token_exchange::account_token_exchange_lock;
 use token_exchange::resolve_openai_bearer_token;
-use upstream::candidates::prepare_gateway_candidates;
 use upstream::proxy::proxy_validated_request;
 
 pub(crate) fn reload_runtime_config_from_env() {
@@ -133,7 +234,7 @@ pub(crate) fn reload_runtime_config_from_env() {
     upstream::config::reload_from_env();
     trace_log::reload_from_env();
     http_bridge::reload_from_env();
-    protocol_adapter::reload_env_dependent_state();
+    protocol_adapter::prompt_cache::reload_runtime_state();
 }
 
 pub(crate) fn current_route_strategy() -> &'static str {
@@ -146,21 +247,56 @@ pub(crate) fn set_route_strategy(strategy: &str) -> Result<&'static str, String>
     Ok(applied)
 }
 
-pub(crate) fn cpa_no_cookie_header_mode_enabled() -> bool {
-    runtime_config::cpa_no_cookie_header_mode_enabled()
+pub(crate) fn current_free_account_max_model() -> String {
+    runtime_config::current_free_account_max_model()
+}
+
+pub(crate) fn request_compression_enabled() -> bool {
+    runtime_config::request_compression_enabled()
+}
+
+pub(crate) fn current_originator() -> String {
+    runtime_config::current_originator()
+}
+
+pub(crate) fn current_wire_originator() -> String {
+    runtime_config::current_wire_originator()
+}
+
+pub(crate) fn current_codex_user_agent_version() -> String {
+    runtime_config::current_codex_user_agent_version()
+}
+
+pub(crate) fn set_originator(originator: &str) -> Result<String, String> {
+    runtime_config::set_originator(originator)
+}
+
+pub(crate) fn set_codex_user_agent_version(version: &str) -> Result<String, String> {
+    runtime_config::set_codex_user_agent_version(version)
+}
+
+pub(crate) fn current_residency_requirement() -> Option<String> {
+    runtime_config::current_residency_requirement()
+}
+
+pub(crate) fn set_residency_requirement(value: Option<&str>) -> Result<Option<String>, String> {
+    runtime_config::set_residency_requirement(value)
+}
+
+pub(crate) fn current_codex_user_agent() -> String {
+    runtime_config::current_codex_user_agent()
+}
+
+pub(crate) fn set_free_account_max_model(model: &str) -> Result<String, String> {
+    runtime_config::set_free_account_max_model(model)
+}
+
+pub(crate) fn set_request_compression_enabled(enabled: bool) -> bool {
+    runtime_config::set_request_compression_enabled(enabled)
 }
 
 pub(crate) fn strict_request_param_allowlist_enabled() -> bool {
     runtime_config::strict_request_param_allowlist_enabled()
-}
-
-pub(crate) fn set_cpa_no_cookie_header_mode(enabled: bool) -> bool {
-    runtime_config::set_cpa_no_cookie_header_mode_enabled(enabled);
-    std::env::set_var(
-        "CODEXMANAGER_CPA_NO_COOKIE_HEADER_MODE",
-        if enabled { "1" } else { "0" },
-    );
-    enabled
 }
 
 pub(crate) fn current_upstream_proxy_url() -> Option<String> {
@@ -172,6 +308,27 @@ pub(crate) fn set_upstream_proxy_url(proxy_url: Option<&str>) -> Result<Option<S
     // 中文注释：用量轮询和 token 刷新复用独立 HTTP client，代理变更后同步重建，避免继续走旧网络路径。
     crate::usage_http::reload_usage_http_client_from_env();
     Ok(applied)
+}
+
+pub(crate) fn current_upstream_stream_timeout_ms() -> u64 {
+    runtime_config::current_upstream_stream_timeout_ms()
+}
+
+pub(crate) fn set_upstream_stream_timeout_ms(timeout_ms: u64) -> u64 {
+    runtime_config::set_upstream_stream_timeout_ms(timeout_ms)
+}
+
+pub(crate) fn current_sse_keepalive_interval_ms() -> u64 {
+    http_bridge::current_sse_keepalive_interval_ms()
+}
+
+pub(crate) fn set_sse_keepalive_interval_ms(interval_ms: u64) -> Result<u64, String> {
+    http_bridge::set_sse_keepalive_interval_ms(interval_ms)
+}
+
+#[cfg(test)]
+pub(crate) fn gateway_runtime_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    runtime_config::gateway_runtime_test_guard()
 }
 
 pub(crate) fn manual_preferred_account() -> Option<String> {

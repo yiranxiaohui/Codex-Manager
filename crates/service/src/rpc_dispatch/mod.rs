@@ -11,6 +11,7 @@ mod app_settings;
 mod gateway;
 mod requestlog;
 mod service_config;
+mod startup;
 mod usage;
 
 pub(super) fn response(req: &JsonRpcRequest, result: Value) -> JsonRpcResponse {
@@ -53,14 +54,14 @@ pub(super) fn ok_result() -> Value {
 pub(super) fn ok_or_error(result: Result<(), String>) -> Value {
     match result {
         Ok(_) => ok_result(),
-        Err(err) => serde_json::json!({ "ok": false, "error": err }),
+        Err(err) => crate::error_codes::rpc_action_error_payload(err),
     }
 }
 
 pub(super) fn value_or_error<T: Serialize>(result: Result<T, String>) -> Value {
     match result {
         Ok(value) => as_json(value),
-        Err(err) => serde_json::json!({ "error": err }),
+        Err(err) => crate::error_codes::rpc_error_payload(err),
     }
 }
 
@@ -78,6 +79,7 @@ pub(crate) fn handle_request(req: JsonRpcRequest) -> JsonRpcResponse {
         let result = InitializeResult {
             server_name: "codexmanager-service".to_string(),
             version: codexmanager_core::core_version().to_string(),
+            user_agent: crate::gateway::current_codex_user_agent(),
         };
         return response(&req, as_json(result));
     }
@@ -97,6 +99,9 @@ pub(crate) fn handle_request(req: JsonRpcRequest) -> JsonRpcResponse {
     if let Some(resp) = service_config::try_handle(&req) {
         return resp;
     }
+    if let Some(resp) = startup::try_handle(&req) {
+        return resp;
+    }
     if let Some(resp) = gateway::try_handle(&req) {
         return resp;
     }
@@ -104,5 +109,8 @@ pub(crate) fn handle_request(req: JsonRpcRequest) -> JsonRpcResponse {
         return resp;
     }
 
-    response(&req, serde_json::json!({"error": "unknown_method"}))
+    response(
+        &req,
+        crate::error_codes::rpc_error_payload("unknown_method".to_string()),
+    )
 }

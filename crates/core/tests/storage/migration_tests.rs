@@ -156,6 +156,51 @@ fn init_tracks_schema_migrations_and_is_idempotent() {
         )
         .expect("count 029 migration");
     assert_eq!(applied_029, 1);
+    let applied_031: i64 = storage
+        .conn
+        .query_row(
+            "SELECT COUNT(1) FROM schema_migrations WHERE version = '031_request_logs_duration_ms'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count 031 migration");
+    assert_eq!(applied_031, 1);
+    let applied_032: i64 = storage
+        .conn
+        .query_row(
+            "SELECT COUNT(1) FROM schema_migrations WHERE version = '032_request_logs_attempt_chain'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count 032 migration");
+    assert_eq!(applied_032, 1);
+    let applied_033: i64 = storage
+        .conn
+        .query_row(
+            "SELECT COUNT(1) FROM schema_migrations WHERE version = '033_login_sessions_workspace_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count 033 migration");
+    assert_eq!(applied_033, 1);
+    let applied_034: i64 = storage
+        .conn
+        .query_row(
+            "SELECT COUNT(1) FROM schema_migrations WHERE version = '034_conversation_bindings'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count 034 migration");
+    assert_eq!(applied_034, 1);
+    let applied_035: i64 = storage
+        .conn
+        .query_row(
+            "SELECT COUNT(1) FROM schema_migrations WHERE version = '035_api_key_profiles_service_tier'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count 035 migration");
+    assert_eq!(applied_035, 1);
 
     assert!(!storage
         .has_column("accounts", "note")
@@ -185,8 +230,29 @@ fn init_tracks_schema_migrations_and_is_idempotent() {
         .has_column("request_logs", "response_adapter")
         .expect("check request_logs.response_adapter"));
     assert!(storage
+        .has_column("request_logs", "duration_ms")
+        .expect("check request_logs.duration_ms"));
+    assert!(storage
+        .has_column("request_logs", "initial_account_id")
+        .expect("check request_logs.initial_account_id"));
+    assert!(storage
+        .has_column("request_logs", "attempted_account_ids_json")
+        .expect("check request_logs.attempted_account_ids_json"));
+    assert!(storage
         .has_column("app_settings", "value")
         .expect("check app_settings.value"));
+    assert!(storage
+        .has_column("login_sessions", "workspace_id")
+        .expect("check login_sessions.workspace_id"));
+    assert!(storage
+        .has_column("conversation_bindings", "thread_anchor")
+        .expect("check conversation_bindings.thread_anchor"));
+    assert!(storage
+        .has_column("conversation_bindings", "last_switch_reason")
+        .expect("check conversation_bindings.last_switch_reason"));
+    assert!(storage
+        .has_column("api_key_profiles", "service_tier")
+        .expect("check api_key_profiles.service_tier"));
     assert!(!storage
         .has_column("request_logs", "input_tokens")
         .expect("check request_logs.input_tokens"));
@@ -371,11 +437,26 @@ fn api_key_profile_migration_backfills_existing_keys() {
             |s| s.ensure_api_key_profiles_table(),
         )
         .expect("apply 015 migration with fallback");
+    storage
+        .apply_sql_or_compat_migration(
+            "035_api_key_profiles_service_tier",
+            include_str!("../../migrations/035_api_key_profiles_service_tier.sql"),
+            |s| s.ensure_api_key_service_tier_column(),
+        )
+        .expect("apply 035 migration with fallback");
 
-    let profile_row: (String, String, String, String, Option<String>, Option<String>) = storage
+    let profile_row: (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = storage
         .conn
         .query_row(
-            "SELECT client_type, protocol_type, auth_scheme, default_model, reasoning_effort, upstream_base_url
+            "SELECT client_type, protocol_type, auth_scheme, default_model, reasoning_effort, upstream_base_url, service_tier
              FROM api_key_profiles
              WHERE key_id = 'key-1'",
             [],
@@ -387,6 +468,7 @@ fn api_key_profile_migration_backfills_existing_keys() {
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
@@ -398,6 +480,7 @@ fn api_key_profile_migration_backfills_existing_keys() {
     assert_eq!(profile_row.3, "gpt-5");
     assert_eq!(profile_row.4.as_deref(), Some("low"));
     assert_eq!(profile_row.5, None);
+    assert_eq!(profile_row.6, None);
 }
 
 #[test]
@@ -457,6 +540,38 @@ fn accounts_sort_index_migration_adds_sort_updated_at_index() {
     assert!(index_sql.contains("accounts"));
     assert!(index_sql.contains("sort ASC"));
     assert!(index_sql.contains("updated_at DESC"));
+}
+
+#[test]
+fn conversation_bindings_migration_adds_indexes() {
+    let storage = Storage::open_in_memory().expect("open in memory");
+    storage.init().expect("init schema");
+
+    let account_index_sql: String = storage
+        .conn
+        .query_row(
+            "SELECT sql
+             FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_conversation_bindings_account_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("load account index definition");
+    assert!(account_index_sql.contains("conversation_bindings"));
+    assert!(account_index_sql.contains("account_id"));
+
+    let last_used_index_sql: String = storage
+        .conn
+        .query_row(
+            "SELECT sql
+             FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_conversation_bindings_last_used_at'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("load last_used index definition");
+    assert!(last_used_index_sql.contains("conversation_bindings"));
+    assert!(last_used_index_sql.contains("last_used_at DESC"));
 }
 
 #[test]
@@ -521,13 +636,16 @@ fn request_logs_compact_migration_drops_legacy_usage_columns_and_preserves_rows(
     assert!(!storage
         .has_column("request_logs", "reasoning_output_tokens")
         .expect("check compact reasoning_output_tokens"));
+    assert!(storage
+        .has_column("request_logs", "duration_ms")
+        .expect("check compact duration_ms"));
 
-    let request_log_row: (i64, String, Option<String>) = storage
+    let request_log_row: (i64, String, Option<String>, Option<i64>) = storage
         .conn
         .query_row(
-            "SELECT id, request_path, response_adapter FROM request_logs WHERE id = 7",
+            "SELECT id, request_path, response_adapter, duration_ms FROM request_logs WHERE id = 7",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("load compacted request log row");
     assert_eq!(request_log_row.0, 7);
@@ -536,6 +654,7 @@ fn request_logs_compact_migration_drops_legacy_usage_columns_and_preserves_rows(
         request_log_row.2.as_deref(),
         Some("OpenAIChatCompletionsJson")
     );
+    assert_eq!(request_log_row.3, None);
 
     let token_row: (Option<i64>, Option<i64>, Option<f64>, Option<i64>, Option<i64>) = storage
         .conn

@@ -1,7 +1,6 @@
 use codexmanager_core::auth::{
     build_authorize_url, device_redirect_uri, device_token_url, device_usercode_url,
     device_verification_url, generate_pkce, generate_state, DEFAULT_CLIENT_ID, DEFAULT_ISSUER,
-    DEFAULT_ORIGINATOR,
 };
 use codexmanager_core::rpc::types::{DeviceAuthInfo, LoginStartResult};
 use codexmanager_core::storage::{now_ts, Event, LoginSession};
@@ -22,13 +21,9 @@ pub(crate) fn login_start(
         std::env::var("CODEXMANAGER_ISSUER").unwrap_or_else(|_| DEFAULT_ISSUER.to_string());
     let client_id =
         std::env::var("CODEXMANAGER_CLIENT_ID").unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
-    let originator =
-        std::env::var("CODEXMANAGER_ORIGINATOR").unwrap_or_else(|_| DEFAULT_ORIGINATOR.to_string());
-    let mut warning = None;
+    let originator = crate::gateway::current_wire_originator();
     if login_type != "device" {
-        if let Err(err) = ensure_login_server() {
-            warning = Some(err);
-        }
+        ensure_login_server()?;
     }
     let redirect_uri = if login_type == "device" {
         std::env::var("CODEXMANAGER_REDIRECT_URI")
@@ -49,6 +44,7 @@ pub(crate) fn login_start(
             state: state.clone(),
             status: "pending".to_string(),
             error: None,
+            workspace_id: workspace_id.clone(),
             note,
             tags,
             group_name,
@@ -109,7 +105,7 @@ pub(crate) fn login_start(
         issuer,
         client_id,
         redirect_uri,
-        warning,
+        warning: None,
         device,
     })
 }

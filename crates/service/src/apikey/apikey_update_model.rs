@@ -1,3 +1,4 @@
+use crate::apikey::service_tier::normalize_service_tier_owned;
 use crate::apikey_profile::{
     normalize_protocol_type, normalize_static_headers_json, normalize_upstream_base_url,
     profile_from_protocol,
@@ -7,8 +8,11 @@ use crate::storage_helpers::open_storage;
 
 pub(crate) fn update_api_key_model(
     key_id: &str,
+    name: Option<String>,
+    has_name: bool,
     model_slug: Option<String>,
     reasoning_effort: Option<String>,
+    service_tier: Option<String>,
     protocol_type: Option<String>,
     upstream_base_url: Option<String>,
     static_headers_json: Option<String>,
@@ -17,6 +21,15 @@ pub(crate) fn update_api_key_model(
         return Err("key id required".to_string());
     }
     let storage = open_storage().ok_or_else(|| "storage unavailable".to_string())?;
+    if has_name {
+        let normalized_name = name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        storage
+            .update_api_key_name(key_id, normalized_name)
+            .map_err(|e| e.to_string())?;
+    }
     let normalized = model_slug
         .as_deref()
         .map(str::trim)
@@ -24,8 +37,14 @@ pub(crate) fn update_api_key_model(
     let normalized_reasoning = reasoning_effort
         .as_deref()
         .and_then(normalize_reasoning_effort);
+    let normalized_service_tier = normalize_service_tier_owned(service_tier)?;
     storage
-        .update_api_key_model_config(key_id, normalized, normalized_reasoning)
+        .update_api_key_model_config(
+            key_id,
+            normalized,
+            normalized_reasoning,
+            normalized_service_tier.as_deref(),
+        )
         .map_err(|e| e.to_string())?;
 
     let has_upstream_base_url = upstream_base_url.is_some();
@@ -59,6 +78,9 @@ pub(crate) fn update_api_key_model(
                 &next_auth,
                 next_upstream_base_url,
                 next_static_headers_json,
+                normalized_service_tier
+                    .as_deref()
+                    .or(current.service_tier.as_deref()),
             )
             .map_err(|e| e.to_string())?;
     }

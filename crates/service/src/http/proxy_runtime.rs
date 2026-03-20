@@ -1,14 +1,14 @@
 use axum::body::{to_bytes, Body};
 use axum::extract::State;
 use axum::http::{header, Request as HttpRequest, Response, StatusCode};
-use axum::routing::any;
+use axum::routing::{any, post};
 use axum::Router;
 use reqwest::Client;
 use std::io;
 
 use crate::http::proxy_bridge::run_proxy_server;
 use crate::http::proxy_request::{build_target_url, filter_request_headers};
-use crate::http::proxy_response::{merge_upstream_headers, text_response};
+use crate::http::proxy_response::{merge_upstream_headers, text_error_response};
 
 #[derive(Clone)]
 struct ProxyState {
@@ -16,8 +16,22 @@ struct ProxyState {
     client: Client,
 }
 
+fn log_proxy_error(status: StatusCode, target_url: &str, message: &str) {
+    log::warn!(
+        "event=front_proxy_error code={} status={} target_url={} message={}",
+        crate::error_codes::classify_message(message).as_str(),
+        status.as_u16(),
+        target_url,
+        message
+    );
+}
+
 fn build_backend_base_url(backend_addr: &str) -> String {
     format!("http://{backend_addr}")
+}
+
+fn build_local_backend_client() -> Result<Client, reqwest::Error> {
+    Client::builder().no_proxy().build()
 }
 
 async fn proxy_handler(
@@ -35,10 +49,13 @@ async fn proxy_handler(
         .and_then(|value| value.trim().parse::<u64>().ok())
     {
         if content_length > max_body_bytes as u64 {
-            return text_response(
+            let message = format!("request body too large: content-length={content_length}");
+            log_proxy_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                format!("request body too large: content-length={content_length}"),
+                target_url.as_str(),
+                message.as_str(),
             );
+            return text_error_response(StatusCode::PAYLOAD_TOO_LARGE, message);
         }
     }
 
@@ -46,24 +63,30 @@ async fn proxy_handler(
     let body_bytes = match to_bytes(body, max_body_bytes).await {
         Ok(bytes) => bytes,
         Err(_) => {
-            return text_response(
+            let message = format!("request body too large: content-length>{max_body_bytes}");
+            log_proxy_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                format!("request body too large: content-length>{max_body_bytes}"),
+                target_url.as_str(),
+                message.as_str(),
             );
+            return text_error_response(StatusCode::PAYLOAD_TOO_LARGE, message);
         }
     };
 
-    let mut builder = state.client.request(parts.method, target_url);
+    let mut builder = state.client.request(parts.method, target_url.as_str());
     builder = builder.headers(outbound_headers);
     builder = builder.body(body_bytes);
 
     let upstream = match builder.send().await {
         Ok(response) => response,
         Err(err) => {
-            return text_response(
+            let message = format!("backend proxy error: {err}");
+            log_proxy_error(
                 StatusCode::BAD_GATEWAY,
-                format!("backend proxy error: {err}"),
+                target_url.as_str(),
+                message.as_str(),
             );
+            return text_error_response(StatusCode::BAD_GATEWAY, message);
         }
     };
 
@@ -74,11 +97,23 @@ async fn proxy_handler(
 
     match response_builder.body(Body::from_stream(upstream.bytes_stream())) {
         Ok(response) => response,
-        Err(err) => text_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("build response failed: {err}"),
-        ),
+        Err(err) => {
+            let message = format!("build response failed: {err}");
+            log_proxy_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                target_url.as_str(),
+                message.as_str(),
+            );
+            text_error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
+        }
     }
+}
+
+fn build_front_proxy_app(state: ProxyState) -> Router {
+    Router::new()
+        .route("/rpc", post(crate::http::rpc_endpoint::handle_rpc_http))
+        .fallback(any(proxy_handler))
+        .with_state(state)
 }
 
 pub(crate) fn run_front_proxy(addr: &str, backend_addr: &str) -> io::Result<()> {
@@ -88,14 +123,13 @@ pub(crate) fn run_front_proxy(addr: &str, backend_addr: &str) -> io::Result<()> 
         .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
     runtime.block_on(async move {
-        let client = Client::builder()
-            .build()
+        let client = build_local_backend_client()
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
         let state = ProxyState {
             backend_base_url: build_backend_base_url(backend_addr),
             client,
         };
-        let app = Router::new().fallback(any(proxy_handler)).with_state(state);
+        let app = build_front_proxy_app(state);
         run_proxy_server(addr, app).await
     })
 }

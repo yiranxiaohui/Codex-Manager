@@ -94,6 +94,10 @@ fn normalize_token(value: Option<i64>) -> Option<i64> {
     value.map(|v| v.max(0))
 }
 
+fn normalize_duration_ms(value: Option<u128>) -> Option<i64> {
+    value.map(|duration| duration.min(i64::MAX as u128) as i64)
+}
+
 fn is_inference_path(path: &str) -> bool {
     path.starts_with("/v1/responses")
         || path.starts_with("/v1/chat/completions")
@@ -125,17 +129,76 @@ pub(super) fn write_request_log(
     status_code: Option<u16>,
     usage: RequestLogUsage,
     error: Option<&str>,
+    duration_ms: Option<u128>,
+) {
+    write_request_log_with_attempts(
+        storage,
+        trace_context,
+        key_id,
+        account_id,
+        request_path,
+        method,
+        model,
+        reasoning_effort,
+        upstream_url,
+        status_code,
+        usage,
+        error,
+        duration_ms,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn write_request_log_with_attempts(
+    storage: &Storage,
+    trace_context: RequestLogTraceContext<'_>,
+    key_id: Option<&str>,
+    account_id: Option<&str>,
+    request_path: &str,
+    method: &str,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    upstream_url: Option<&str>,
+    status_code: Option<u16>,
+    usage: RequestLogUsage,
+    error: Option<&str>,
+    duration_ms: Option<u128>,
+    attempted_account_ids: Option<&[String]>,
 ) {
     let original_path = trace_context.original_path.unwrap_or(request_path);
     let adapted_path = trace_context.adapted_path.unwrap_or(request_path);
+    let initial_account_id = attempted_account_ids
+        .and_then(|items| items.first())
+        .map(String::as_str);
+    let attempted_account_ids_json = attempted_account_ids
+        .filter(|items| !items.is_empty())
+        .and_then(|items| serde_json::to_string(items).ok());
     let input_tokens = normalize_token(usage.input_tokens);
     let cached_input_tokens = normalize_token(usage.cached_input_tokens);
     let output_tokens = normalize_token(usage.output_tokens);
     let total_tokens = normalize_token(usage.total_tokens);
     let reasoning_output_tokens = normalize_token(usage.reasoning_output_tokens);
+    let duration_ms = normalize_duration_ms(duration_ms);
     let created_at = now_ts();
     let estimated_cost_usd =
         estimate_cost_usd(model, input_tokens, cached_input_tokens, output_tokens);
+    super::trace_log::log_failed_request(
+        created_at,
+        trace_context.trace_id,
+        key_id,
+        account_id,
+        method,
+        request_path,
+        Some(original_path),
+        Some(adapted_path),
+        model,
+        reasoning_effort,
+        upstream_url,
+        status_code,
+        error,
+        duration_ms,
+    );
     let success = status_code
         .map(|status| (200..300).contains(&status))
         .unwrap_or(false);
@@ -167,6 +230,8 @@ pub(super) fn write_request_log(
             trace_id: trace_context.trace_id.map(|v| v.to_string()),
             key_id: key_id.map(|v| v.to_string()),
             account_id: account_id.map(|v| v.to_string()),
+            initial_account_id: initial_account_id.map(str::to_string),
+            attempted_account_ids_json,
             request_path: request_path.to_string(),
             original_path: Some(original_path.to_string()),
             adapted_path: Some(adapted_path.to_string()),
@@ -179,6 +244,7 @@ pub(super) fn write_request_log(
                 .map(str::to_string),
             upstream_url: upstream_url.map(|v| v.to_string()),
             status_code: status_code.map(|v| i64::from(v)),
+            duration_ms,
             input_tokens: None,
             cached_input_tokens: None,
             output_tokens: None,

@@ -30,22 +30,6 @@ pub(super) fn try_handle(req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
             crate::gateway::clear_manual_preferred_account();
             super::ok_result()
         }
-        "gateway/headerPolicy/get" => super::as_json(serde_json::json!({
-            "cpaNoCookieHeaderModeEnabled": crate::gateway::cpa_no_cookie_header_mode_enabled(),
-            "envKey": "CODEXMANAGER_CPA_NO_COOKIE_HEADER_MODE",
-        })),
-        "gateway/headerPolicy/set" => {
-            let enabled = super::bool_param(req, "cpaNoCookieHeaderModeEnabled")
-                .or_else(|| super::bool_param(req, "enabled"))
-                .unwrap_or(false);
-            super::value_or_error(crate::set_gateway_cpa_no_cookie_header_mode(enabled).map(
-                |applied| {
-                    serde_json::json!({
-                        "cpaNoCookieHeaderModeEnabled": applied,
-                    })
-                },
-            ))
-        }
         "gateway/backgroundTasks/get" => {
             super::as_json(crate::usage_refresh::background_tasks_settings())
         }
@@ -75,6 +59,38 @@ pub(super) fn try_handle(req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
                     })
                 }),
             )
+        }
+        "gateway/transport/get" => super::as_json(serde_json::json!({
+            "sseKeepaliveIntervalMs": crate::current_gateway_sse_keepalive_interval_ms(),
+            "upstreamStreamTimeoutMs": crate::current_gateway_upstream_stream_timeout_ms(),
+            "envKeys": [
+                "CODEXMANAGER_SSE_KEEPALIVE_INTERVAL_MS",
+                "CODEXMANAGER_UPSTREAM_STREAM_TIMEOUT_MS"
+            ],
+            "requiresRestart": false,
+        })),
+        "gateway/transport/set" => {
+            let requested_sse_keepalive_interval_ms = u64_param(req, "sseKeepaliveIntervalMs");
+            let requested_upstream_stream_timeout_ms = u64_param(req, "upstreamStreamTimeoutMs");
+            super::value_or_error((|| {
+                let sse_keepalive_interval_ms =
+                    if let Some(value) = requested_sse_keepalive_interval_ms {
+                        crate::set_gateway_sse_keepalive_interval_ms(value)?
+                    } else {
+                        crate::current_gateway_sse_keepalive_interval_ms()
+                    };
+                let upstream_stream_timeout_ms =
+                    if let Some(value) = requested_upstream_stream_timeout_ms {
+                        crate::set_gateway_upstream_stream_timeout_ms(value)?
+                    } else {
+                        crate::current_gateway_upstream_stream_timeout_ms()
+                    };
+                Ok(serde_json::json!({
+                    "sseKeepaliveIntervalMs": sse_keepalive_interval_ms,
+                    "upstreamStreamTimeoutMs": upstream_stream_timeout_ms,
+                    "requiresRestart": false,
+                }))
+            })())
         }
         "gateway/backgroundTasks/set" => {
             let patch = crate::usage_refresh::BackgroundTasksSettingsPatch {
