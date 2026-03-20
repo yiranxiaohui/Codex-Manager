@@ -24,9 +24,9 @@ jobs:
       matrix:
         include:
           - image_suffix: service
-            dockerfile: crates/docker/Dockerfile.service
+            dockerfile: docker/Dockerfile.service
           - image_suffix: web
-            dockerfile: crates/docker/Dockerfile.web
+            dockerfile: docker/Dockerfile.web
 
     steps:
       - name: Checkout
